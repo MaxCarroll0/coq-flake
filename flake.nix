@@ -14,8 +14,17 @@
     in
     {
       packages = eachSystem (
-        system: pkgs: rec {
+        system: pkgs:
+        let
           coq = pkgs.coq;
+          stdlib = pkgs.coqPackages.stdlib;
+          stdlibEnv = ''
+            export COQPATH="${stdlib}/lib/coq/${coq.coq-version}/user-contrib''${COQPATH:+:$COQPATH}"
+            export ROCQPATH="$COQPATH"
+          '';
+        in
+        {
+          inherit coq stdlib;
           coq-lsp = pkgs.coqPackages.coq-lsp;
 
           typecheck = pkgs.writeShellApplication {
@@ -25,6 +34,7 @@
               pkgs.gnumake
             ];
             text = ''
+              ${stdlibEnv}
               if [[ -f Makefile ]]; then
                 if make; then echo "PASS  Coq (make)"; else echo "FAIL  Coq (make)"; exit 1; fi
               elif [[ -f _CoqProject ]]; then
@@ -55,6 +65,7 @@
               pkgs.texliveMedium
             ];
             text = ''
+              ${stdlibEnv}
               if [[ -f Makefile ]] && grep -qE '^html:' Makefile; then
                 make html
               else
@@ -71,11 +82,48 @@
         }
       );
 
+      lib = eachSystem (
+        system: pkgs: {
+          mkBuild =
+            {
+              src,
+              name ? "coq-build",
+              strict ? false,
+            }:
+            pkgs.stdenv.mkDerivation {
+              inherit name;
+              src = nixpkgs.lib.cleanSourceWith {
+                inherit src;
+                filter =
+                  path: _type:
+                  !(builtins.elem (baseNameOf path) [
+                    ".git"
+                    ".direnv"
+                    "doc"
+                  ]);
+              };
+              buildPhase = ''
+                export HOME="$TMPDIR"
+                mkdir -p "$out"
+                set +e
+                ${self.packages.${system}.typecheck}/bin/typecheck-coq > "$out/typecheck.log" 2>&1
+                status=$?
+                set -e
+                if [ "$status" -eq 0 ]; then echo PASS > "$out/status"; else echo "FAIL ($status)" > "$out/status"; fi
+                tail -n 20 "$out/typecheck.log"
+                ${if strict then ''[ "$status" -eq 0 ] || exit "$status"'' else ""}
+              '';
+              installPhase = "true";
+            };
+        }
+      );
+
       devShells = eachSystem (
         system: pkgs: {
           default = pkgs.mkShell {
             packages = [
               self.packages.${system}.coq
+              self.packages.${system}.stdlib
               self.packages.${system}.coq-lsp
               pkgs.gnumake
               self.packages.${system}.typecheck
